@@ -1,12 +1,74 @@
-import {transpileModule, TranspileOptions, TranspileOutput} from 'typescript'
+import { TranspileOptions } from 'typescript'
+
+import { TypeScriptWorker, CompiledOutputFile, moduleResolutionToEnum, moduleKindToEnum } from './ts-worker'
+
+export async function getTSConfig(storage: LocalForage): Promise<TranspileOptions> {
+  // let cachedTsConfig = await storage.getItem<TranspileOptions | undefined>('tsConfig')
+
+  // if (cachedTsConfig) {
+  //   return cachedTsConfig
+  // }
+
+  const tsConfigResponse = await fetch('/tsconfig.json')
+
+  if (!tsConfigResponse.ok || tsConfigResponse.status !== 200) {
+    throw new Error(tsConfigResponse.statusText)
+  }
+
+  try {
+    var tsConfigRaw = (await tsConfigResponse.json()) as TranspileOptions
+  } catch (error) {
+    console.error(error)
+
+    throw new Error('Unable to parse tsconfig.json file')
+  }
+
+  const rawModuleResolution = (tsConfigRaw.compilerOptions!.moduleResolution as unknown) as string
+  const rawModuleKind = (tsConfigRaw.compilerOptions!.module as unknown) as string
+
+  const moduleResolution =
+    moduleResolutionToEnum[(rawModuleResolution as unknown) as keyof typeof moduleResolutionToEnum] ||
+    moduleResolutionToEnum.Node
+
+  const module = moduleKindToEnum[(rawModuleKind as unknown) as keyof typeof moduleKindToEnum]
+
+  const tsConfig: TranspileOptions = {
+    ...tsConfigRaw,
+    compilerOptions: {
+      ...tsConfigRaw.compilerOptions,
+      moduleResolution,
+      module
+    }
+  }
+
+  await storage.setItem<TranspileOptions>('tsConfig', tsConfig)
+
+  return tsConfig
+}
 
 export default async function compileTypescript(
   moduleRequest: Request,
   tsConfig: TranspileOptions
-): Promise<TranspileOutput> {
-  const moduleContent = await moduleRequest.text()
+): Promise<CompiledOutputFile> {
+  let cachedTypeScriptWorker: undefined | TypeScriptWorker
 
-  const compiledOutput = transpileModule(moduleContent, tsConfig)
+  if (!cachedTypeScriptWorker) {
+    cachedTypeScriptWorker = new TypeScriptWorker({
+      compilerOptions: tsConfig.compilerOptions!
+    })
+  }
 
-  return compiledOutput
+  const moduleResponse = await fetch(moduleRequest.url)
+  const moduleContent = await moduleResponse.text()
+
+  await cachedTypeScriptWorker.addRootFile({
+    fileName: moduleRequest.url,
+    content: moduleContent
+  })
+
+  // trigger fetch, potentially replace with ts.preProcessFile PreProcessedFileInfo
+  await cachedTypeScriptWorker.getEmitOutput(moduleRequest.url)
+  const result = await cachedTypeScriptWorker.getEmitOutput(moduleRequest.url)
+
+  return result
 }
