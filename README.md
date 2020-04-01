@@ -1,4 +1,4 @@
-# <my-server />
+# `<my-server />`
 
 A web app compiler that runs in your browser, and companion to [<my-app />](https://github.com/nirrius/my-app).
 
@@ -62,8 +62,8 @@ Now open index.html in your browser. You're ready to code!
 
 # TODO
 
-[ ] Much of everything
-[ ] Offer premade ZIP with local server script
-[ ] TypeScript lib support
-[ ] SCSS compilation
-[ ] Deploy to Cloudflare Worker
+- [ ] Much of everything
+- [ ] Offer premade ZIP with local server script
+- [ ] TypeScript lib support
+- [ ] SCSS compilation
+- [ ] Deploy to Cloudflare Worker
