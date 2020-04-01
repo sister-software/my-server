@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Server</title>
+  </head>
+  <body>
+    <h1 id="-my-server-"><code>&lt;my-server /&gt;</code></h1>
+    <p>
+      A web app compiler that runs in your browser, and companion to
+      <a href="https://github.com/nirrius/my-app"><my-app /></a>.
+    </p>
+    <p>⚠️ Here be dragons! This project is a work in progress and is only for the brave. ⚠️</p>
+    <h2 id="what-s-this-all-about-">What&#39;s this all about?</h2>
+    <p>
+      When it comes to contemporary web development, tooling is mandatory. We compile TypeScript and JSX into
+      JavaScript, SCSS into CSS... The list goes on. But wouldn&#39;t it be nice to just start writing code without
+      spending any time getting your machine setup? My Server has you covered.
+    </p>
+    <h2 id="try-it">Try it</h2>
+    <p>Start by creating a folder with an <code>index.html</code> with the following content:</p>
+    <pre><code class="lang-html"><span class="hljs-meta">&lt;!DOCTYPE html&gt;</span>
+<span class="hljs-tag">&lt;<span class="hljs-name">html</span> <span class="hljs-attr">lang</span>=<span class="hljs-string">"en"</span>&gt;</span>
+  <span class="hljs-tag">&lt;<span class="hljs-name">head</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">meta</span> <span class="hljs-attr">charset</span>=<span class="hljs-string">"UTF-8"</span> /&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">meta</span> <span class="hljs-attr">name</span>=<span class="hljs-string">"viewport"</span> <span class="hljs-attr">content</span>=<span class="hljs-string">"width=device-width, initial-scale=1.0"</span> /&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">title</span>&gt;</span>My App<span class="hljs-tag">&lt;/<span class="hljs-name">title</span>&gt;</span>
+  <span class="hljs-tag">&lt;/<span class="hljs-name">head</span>&gt;</span>
+
+  <span class="hljs-tag">&lt;<span class="hljs-name">body</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">script</span> <span class="hljs-attr">src</span>=<span class="hljs-string">"https://my-server.js.org/server-latest.js"</span>&gt;</span><span class="undefined"></span><span class="hljs-tag">&lt;/<span class="hljs-name">script</span>&gt;</span>
+
+    <span class="hljs-tag">&lt;<span class="hljs-name">script</span> <span class="hljs-attr">type</span>=<span class="hljs-string">"module"</span>&gt;</span><span class="javascript">
+      <span class="hljs-keyword">const</span> myServer = <span class="hljs-keyword">new</span> <span class="hljs-built_in">window</span>.MyServer({
+        <span class="hljs-attr">entry</span>: <span class="hljs-string">'app/main.ts'</span>,
+        <span class="hljs-attr">scope</span>: <span class="hljs-string">'/'</span>,
+        <span class="hljs-attr">workerPath</span>: <span class="hljs-string">'/service-worker.js'</span>
+      })
+
+      myServer.register()
+    </span><span class="hljs-tag">&lt;/<span class="hljs-name">script</span>&gt;</span>
+  <span class="hljs-tag">&lt;/<span class="hljs-name">body</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">html</span>&gt;</span>
+</code></pre>
+    <p>
+      Next, we&#39;ll need a service worker. In the same folder, create a file named <code>service-worker.js</code> with
+      the following content:
+    </p>
+    <pre><code class="lang-js"><span class="hljs-keyword">self</span>.importScripts(<span class="hljs-symbol">'https</span>:<span class="hljs-comment">//my-server.js.org/service-worker-latest.js')</span>
+</code></pre>
+    <p>Last and certainly not least, a TypeScript file to start your application. Create <code>main.ts</code>:</p>
+    <pre><code class="lang-ts">const greeting: HTMLDivElement = document.createElement(<span class="hljs-string">'div'</span>)
+
+greeting<span class="hljs-selector-class">.textContent</span> = <span class="hljs-string">'Hello there!'</span>
+
+document<span class="hljs-selector-class">.body</span><span class="hljs-selector-class">.appendChild</span>(greeting)
+</code></pre>
+    <p>Now open index.html in your browser. You&#39;re ready to code!</p>
+    <blockquote>
+      <p>
+        During development you&#39;ll be able to use service worker through localhost, but to deploy it on a site
+        you&#39;ll need to have HTTPS setup on your server.
+      </p>
+    </blockquote>
+    <h1 id="todo">TODO</h1>
+    <ul>
+      <li>[ ] Much of everything</li>
+      <li>[ ] Offer premade ZIP with local server script</li>
+      <li>[ ] TypeScript lib support</li>
+      <li>[ ] SCSS compilation</li>
+      <li>[ ] Deploy to Cloudflare Worker</li>
+    </ul>
+  </body>
+</html>
