@@ -1,6 +1,6 @@
 # `<my-server />`
 
-A web app compiler that runs in your browser, and companion to [<my-app />](https://github.com/nirrius/my-app).
+A web app compiler that runs in your browser, and companion to [`<my-app />`](https://github.com/nirrius/my-app).
 
 ⚠️ Here be dragons! This project is a work in progress and is only for the brave. ⚠️
 
