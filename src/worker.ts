@@ -23,7 +23,25 @@ async function parseFetchEvent({ request }: FetchEvent): Promise<Response> {
 
   if (fileTypePatterns.typescript.test(request.url) && request.url.indexOf(skipCompile) === -1) {
     const tsConfig = await getTSConfig(storage)
-    const { compiledResult, diagnostics } = await compileTypescript(request, tsConfig)
+
+    try {
+      var { compiledResult, diagnostics } = await compileTypescript(request, tsConfig)
+    } catch (error) {
+      console.error(error)
+      return new Response(
+        new Blob(error, {
+          type: 'text/plain'
+        }),
+        {
+          status: 500
+        }
+      )
+    }
+    if (diagnostics && diagnostics.length) {
+      const diagnosticsContent = diagnostics.join('\n')
+
+      console.error(diagnosticsContent)
+    }
 
     if (compiledResult) {
       return new Response(

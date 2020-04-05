@@ -58,16 +58,9 @@ export default async function compileTypescript(
     })
   }
 
-  const moduleResponse = await fetch(moduleRequest.url)
-  const moduleContent = await moduleResponse.text()
+  await cachedTypeScriptWorker.addLibFiles()
+  await cachedTypeScriptWorker.addRootFile(moduleRequest.url)
 
-  await cachedTypeScriptWorker.addRootFile({
-    fileName: moduleRequest.url,
-    content: moduleContent
-  })
-
-  // trigger fetch, potentially replace with ts.preProcessFile PreProcessedFileInfo
-  await cachedTypeScriptWorker.getEmitOutput(moduleRequest.url)
   const result = await cachedTypeScriptWorker.getEmitOutput(moduleRequest.url)
 
   return result

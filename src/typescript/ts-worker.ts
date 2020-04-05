@@ -98,13 +98,21 @@ export interface TypeScriptWorkerOptions {
   extraLibs?: IExtraLibs
 }
 
+interface FileModelResolveQueue {
+  [fileName: string]: undefined | Promise<RootFileModel>
+}
+
+interface FileModelResolves {
+  [fileName: string]: FileModelResolveQueue
+}
+
 export class TypeScriptWorker implements ts.LanguageServiceHost {
   // --- model sync -----------------------
 
   private _extraLibs: IExtraLibs = Object.create(null)
   private _languageService = ts.createLanguageService(this)
   private _compilerOptions: ts.CompilerOptions
-  private _fileNameToFileModelResolveQueue: { [fileName: string]: undefined | Promise<RootFileModel> } = {}
+  private _fileNameToResolveQueue: FileModelResolves = {}
   private _fileNameToFileModel: FileNameToFileEntry = {}
   private _printer = ts.createPrinter()
 
@@ -117,34 +125,45 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
   importTransformer = (): ts.TransformerFactory<ts.SourceFile> => {
     return context => {
       const visit: ts.Visitor = node => {
+        if (ts.isSourceFile(node) && node.libReferenceDirectives && node.libReferenceDirectives.length) {
+          const containingFilePath = node.fileName
+          const resolveQueue = this._fileNameToResolveQueue[containingFilePath]
+
+          for (let referenceDirective of node.libReferenceDirectives) {
+            resolveQueue[referenceDirective.fileName] = this.addLibFile(referenceDirective.fileName)
+          }
+        }
+
         if (ts.isImportDeclaration(node) && node.moduleSpecifier) {
           const sourceFile = node.getSourceFile()
           const containingFilePath = sourceFile.fileName
+          const resolveQueue = this._fileNameToResolveQueue[containingFilePath]
+
           // Omit quotes
           const moduleName = node.moduleSpecifier.getText().slice(1, -1)
 
+          // ts.getAnyExtensionFromPath(moduleName)
           const [, isRelative, fileName] = moduleName.match(moduleNamePattern) || []
 
           if (isRelative) {
             // Module name is relative, so we build an absolute path.
             const relativePath = containingFilePath.substring(0, containingFilePath.lastIndexOf('/') + 1)
 
-            const resolvedModuleName = fileName.match(scriptFileExtensionPattern) ? moduleName : moduleName + '.ts'
-            const absoluteModulePath = ts.resolvePath(relativePath, resolvedModuleName)
+            const absoluteModulePath = ts.resolvePath(relativePath, moduleName)
+            const absoluteModulePathNormalized = fileName.match(scriptFileExtensionPattern)
+              ? absoluteModulePath
+              : absoluteModulePath + '.ts'
 
             if (
-              !this._fileNameToFileModel[absoluteModulePath] &&
-              !this._fileNameToFileModelResolveQueue[absoluteModulePath]
+              !this._fileNameToFileModel[absoluteModulePathNormalized] &&
+              !resolveQueue[absoluteModulePathNormalized]
             ) {
-              this._fileNameToFileModelResolveQueue[absoluteModulePath] = this._createFileResolvePromise(
-                absoluteModulePath
-              )
+              resolveQueue[absoluteModulePath] = this.addRootFile(absoluteModulePathNormalized)
             }
 
             const newNode = ts.getMutableClone(node)
-            // const moduleSpecifier = moduleText + '.ts'
 
-            newNode.moduleSpecifier = ts.createStringLiteral(absoluteModulePath)
+            newNode.moduleSpecifier = ts.createStringLiteral(absoluteModulePathNormalized)
             // Update sourcemap.
             ts.setSourceMapRange(newNode, ts.getSourceMapRange(node))
 
@@ -163,28 +182,67 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     before: [this.importTransformer()]
   }
 
-  addRootFile = async (rootFile: RootFile): Promise<RootFileModel> => {
-    if (this._fileNameToFileModel[rootFile.fileName]) {
-      return this._fileNameToFileModel[rootFile.fileName]!
+  addLibFile = async (libraryName: string): Promise<RootFileModel> => {
+    const libraryNameNormalized = libraryName.toLowerCase()
+    const libraryNameWithExtension = `lib.${libraryNameNormalized}.d.ts`
+
+    if (this._fileNameToFileModel[libraryNameNormalized]) {
+      return this._fileNameToFileModel[libraryNameNormalized]!
     }
 
-    const sourceFile = ts.createSourceFile(rootFile.fileName, rootFile.content, ts.ScriptTarget.Latest, true)
+    const libraryPath = `http://localhost:8888/typescript/lib/${libraryNameWithExtension}`
+
+    return this.addRootFile(libraryNameWithExtension, libraryPath)
+  }
+
+  addLibFiles = async (libraries = this._compilerOptions.lib): Promise<void> => {
+    if (!libraries || !libraries.length) return
+
+    for (let library of libraries) {
+      await this.addLibFile(library)
+    }
+  }
+
+  addRootFile = async (fileName: string, fileUrlPath = fileName): Promise<RootFileModel> => {
+    if (this._fileNameToFileModel[fileName]) {
+      return this._fileNameToFileModel[fileName]!
+    }
+
+    if (!this._fileNameToResolveQueue[fileName]) {
+      this._fileNameToResolveQueue[fileName] = {}
+    }
+
+    const fileResponse = await fetch(fileUrlPath + '?skip-compile=true')
+
+    if (!fileResponse.ok || fileResponse.status !== 200) {
+      throw new Error(fileResponse.statusText)
+    }
+
+    const fileContent = await fileResponse.text()
+
+    const sourceFile = ts.createSourceFile(fileName, fileContent, ts.ScriptTarget.Latest, true)
 
     const transformationResult = ts.transform(sourceFile, this.customTransformers.before, this._compilerOptions)
 
     const rootFileModel: RootFileModel = {
-      ...rootFile,
+      fileName,
       content: this._printer.printFile(transformationResult.transformed[0]),
+      // TODO: consider caching source files.
+      // sourceFile,
       version: 1
     }
 
-    this._fileNameToFileModel[rootFile.fileName] = rootFileModel
+    this._fileNameToFileModel[fileName] = rootFileModel
 
-    const resolveQueue = Object.keys(this._fileNameToFileModelResolveQueue).map(
-      fileName => this._fileNameToFileModelResolveQueue[fileName]!
-    )
+    const resolveQueue = this._fileNameToResolveQueue[fileName]
+    const resolveQueueFileNames = Object.keys(resolveQueue)
+    const resolveQueuePromises = resolveQueueFileNames.map(fileName => resolveQueue[fileName]!)
 
-    await Promise.all(resolveQueue)
+    if (resolveQueuePromises.length) {
+      await Promise.all(resolveQueuePromises)
+
+      resolveQueueFileNames.forEach(fileName => delete resolveQueue[fileName])
+    }
 
     return rootFileModel
   }
@@ -225,16 +283,6 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     const scriptText = this._getScriptText(fileName)
 
     if (scriptText) return scriptText
-
-    const possibleQueueItem = this._fileNameToFileModelResolveQueue[fileName]
-    if (!possibleQueueItem) {
-      console.warn(`queue item for ${fileName} not present before script text fetch`)
-      return
-    }
-
-    const fileModel = await possibleQueueItem
-
-    return fileModel.content
   }
 
   _getScriptText(fileName: string): string | undefined {
@@ -287,7 +335,6 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
       (options.target && tsTargetToEnum[(options.target as unknown) as keyof typeof tsTargetToEnum]) ||
       tsTargetToEnum.ES2015
 
-    console.log({ tsTargetEnum })
     return tsTargetEnum <= tsTargetToEnum.ES2015 ? libBundles.es2015DTS.fileName : libBundles.defaultLibDTS.fileName
   }
 
@@ -295,48 +342,25 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     return fileName === this.getDefaultLibFileName(this._compilerOptions)
   }
 
-  _createFileResolvePromise = async (filePath: string): Promise<RootFileModel> => {
-    const fileResponse = await fetch(filePath + '?skip-compile=true')
-
-    if (!fileResponse.ok || fileResponse.status !== 200) {
-      throw new Error(fileResponse.statusText)
-    }
-
-    const fileContent = await fileResponse.text()
-
-    const rootFileModel = await this.addRootFile({
-      fileName: filePath,
-      content: fileContent
-    })
-
-    delete this._fileNameToFileModelResolveQueue[filePath]
-
-    return rootFileModel
-  }
-
-  // resolveModuleNames = (moduleNames: string[], containingFilePath: string) => {
-  //   ts.preProcessFile
-  //   const resolvedModules: ts.ResolvedModule[] = []
-  //   const relativePath = containingFilePath.substring(0, containingFilePath.lastIndexOf('/') + 1)
-
-  //   for (const moduleName of moduleNames) {
-  //     let resolvedFileName = moduleName
-
-  //     const [, isRelative, fileName] = moduleName.match(moduleNamePattern) || []
-
-  //     if (isRelative) {
-  //       resolvedFileName = fileName.match(scriptFileExtensionPattern) ? fileName : fileName + '.ts'
-  //       const filePath = urlJoin(relativePath + resolvedFileName)
-
-  //       if (!this._fileNameToFileModel[moduleName] && !this._fileNameToFileModelResolveQueue[moduleName]) {
-  //         this._fileNameToFileModelResolveQueue[moduleName] = this._createFileResolvePromise(moduleName, filePath)
-  //       }
-  //     }
-
-  //     resolvedModules.push({ resolvedFileName })
+  // _createFileResolvePromise = async (absoluteModulePath: string, fileAbsoluteUrl: string): Promise<RootFileModel> => {
+  //   if (this._fileNameToFileModel[fileAbsoluteUrl]) {
+  //     return this._fileNameToFileModel[fileAbsoluteUrl]!
   //   }
 
-  //   return resolvedModules
+  //   const fileResponse = await fetch(fileAbsoluteUrl + '?skip-compile=true')
+
+  //   if (!fileResponse.ok || fileResponse.status !== 200) {
+  //     throw new Error(fileResponse.statusText)
+  //   }
+
+  //   const fileContent = await fileResponse.text()
+
+  //   const rootFileModel = await this.addRootFile({
+  //     fileName: fileAbsoluteUrl,
+  //     content: fileContent
+  //   })
+
+  //   return rootFileModel
   // }
 
   // --- language features

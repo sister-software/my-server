@@ -47,12 +47,14 @@ export default [
             'getMutableClone',
             'isNumericLiteral',
             'isImportDeclaration',
+            'isSourceFile',
             'updateImportDeclaration',
             'Visitor',
             'createStringLiteral',
             'visitEachChild',
             'visitNode',
-            'transform'
+            'transform',
+            'SyntaxKind'
           ]
         }
       }),
