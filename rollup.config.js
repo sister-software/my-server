@@ -6,7 +6,7 @@ import copy from 'rollup-plugin-copy'
 
 export default [
   {
-    input: 'src/worker.ts',
+    input: 'src/service-worker.ts',
     output: {
       dir: 'build',
       format: 'cjs'

@@ -1,5 +1,7 @@
 import * as ts from 'typescript'
-import { lib_es5_dts, lib_es2015_bundled_dts } from './lib/lib'
+import { DiagnosticsResult, DiagnosticPair } from './diagnostics'
+import { serviceWorkerWarn } from '../../utils/log'
+import { SKIP_COMPILE_HEADER, DEFAULT_SKIP_CACHE_INIT } from '../../../server/utils/requests'
 
 const noop = () => undefined
 
@@ -12,26 +14,7 @@ export interface IExtraLibs {
   [path: string]: IExtraLib
 }
 
-const libBundles = {
-  defaultLibDTS: {
-    fileName: 'defaultLib:lib.d.ts',
-    content: lib_es5_dts
-  },
-  es2015DTS: {
-    fileName: 'defaultLib:lib.es2015.d.ts',
-    content: lib_es2015_bundled_dts
-  }
-}
-
 const moduleNamePattern = /(\.\/)(.+)/
-
-const libBundlesByFileName: { [fileName: string]: RootFile } = {}
-
-Object.keys(libBundles).forEach(libName => {
-  const libBundle = libBundles[libName as keyof typeof libBundles]
-
-  libBundlesByFileName[libBundle.fileName] = libBundle
-})
 
 export const moduleResolutionToEnum = {
   node: ts.ModuleResolutionKind.NodeJs,
@@ -67,10 +50,12 @@ export const tsTargetToEnum = {
 
 export interface RootFile {
   fileName: string
-  content: string
+  uncompiledText: string
 }
 
 export interface RootFileModel extends RootFile {
+  sourceFile: ts.SourceFile
+  rawResponse: Response
   version: number
 }
 
@@ -78,18 +63,25 @@ export interface FileNameToFileEntry {
   [fileName: string]: RootFileModel | undefined
 }
 
-export type CompiledOutputFile =
-  | {
-      fileName: string
-      compiledResult: string
-      // diagnostics: null
-      diagnostics: string[]
-    }
-  | {
-      fileName: string
-      compiledResult: null
-      diagnostics: string[]
-    }
+export interface CompiledOutputFile {
+  fileName: string
+  rawResponse: Response
+  uncompiledText: string
+  compiledResult: string | null
+  diagnostics: DiagnosticsResult[]
+}
+
+export interface CombinedEmitOutput {
+  files: CompiledOutputByFileName
+  // diagnosticsByType: {
+  //   [T in DiagnosticType]: DiagnosticsResult
+  // }
+  diagnostics: DiagnosticsResult[]
+}
+
+export interface CompiledOutputByFileName {
+  [fileName: string]: CompiledOutputFile | undefined
+}
 
 const scriptFileExtensionPattern = /\.ts|js$/g
 
@@ -97,6 +89,8 @@ export interface TypeScriptWorkerOptions {
   compilerOptions: ts.CompilerOptions
   extraLibs?: IExtraLibs
 }
+
+export const TYPESCRIPT_CACHE_NAME = 'MyServer:TypeScript:Compiled'
 
 interface FileModelResolveQueue {
   [fileName: string]: undefined | Promise<RootFileModel>
@@ -107,18 +101,28 @@ interface FileModelResolves {
 }
 
 export class TypeScriptWorker implements ts.LanguageServiceHost {
-  // --- model sync -----------------------
+  // --- Model Sync
 
   private _extraLibs: IExtraLibs = Object.create(null)
   private _languageService = ts.createLanguageService(this)
   private _compilerOptions: ts.CompilerOptions
+
   private _fileNameToResolveQueue: FileModelResolves = {}
   private _fileNameToFileModel: FileNameToFileEntry = {}
   private _printer = ts.createPrinter()
+  private _responseCache?: Cache
+
+  fetchResponseCache = async (): Promise<Cache> => {
+    if (this._responseCache) return this._responseCache
+
+    this._responseCache = await caches.open(TYPESCRIPT_CACHE_NAME)
+
+    return this._responseCache
+  }
 
   constructor(options: TypeScriptWorkerOptions) {
+    // TODO: Consider deep cloning.
     this._compilerOptions = options.compilerOptions
-
     this._extraLibs = options.extraLibs || {}
   }
 
@@ -203,7 +207,8 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     }
   }
 
-  addRootFile = async (fileName: string, fileUrlPath = fileName): Promise<RootFileModel> => {
+  // TODO: Define overloads for just passing raw response.
+  addRootFile = async (fileName: string, fileUrlPath = fileName, rawResponse?: Response): Promise<RootFileModel> => {
     if (this._fileNameToFileModel[fileName]) {
       return this._fileNameToFileModel[fileName]!
     }
@@ -212,23 +217,24 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
       this._fileNameToResolveQueue[fileName] = {}
     }
 
-    const fileResponse = await fetch(fileUrlPath + '?skip-compile=true')
+    if (!rawResponse) {
+      rawResponse = await fetch(`${fileUrlPath}?${SKIP_COMPILE_HEADER}=true`, DEFAULT_SKIP_CACHE_INIT)
 
-    if (!fileResponse.ok || fileResponse.status !== 200) {
-      throw new Error(fileResponse.statusText)
+      if (!rawResponse.ok || rawResponse.status !== 200) {
+        throw new Error(rawResponse.statusText)
+      }
     }
 
-    const fileContent = await fileResponse.text()
+    const fileContent = await rawResponse.text()
 
-    const sourceFile = ts.createSourceFile(fileName, fileContent, ts.ScriptTarget.Latest, true)
-
+    const sourceFile = ts.createSourceFile(fileName, fileContent, this._compilerOptions.target!, true)
     const transformationResult = ts.transform(sourceFile, this.customTransformers.before, this._compilerOptions)
 
     const rootFileModel: RootFileModel = {
       fileName,
-      content: this._printer.printFile(transformationResult.transformed[0]),
-      // TODO: consider caching source files.
-      // sourceFile,
+      uncompiledText: this._printer.printFile(transformationResult.transformed[0]),
+      rawResponse,
+      sourceFile,
       version: 1
     }
 
@@ -248,6 +254,41 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
   }
 
   // --- language service host ---------------
+
+  fileExists = (fileName: string): boolean => {
+    return !!this._fileNameToFileModel[fileName]
+  }
+
+  readFile = (fileName: string): string | undefined => {
+    const fileModel = this._fileNameToFileModel[fileName]
+
+    return fileModel ? fileModel.uncompiledText : undefined
+  }
+
+  getSourceFile = (
+    fileName: string,
+    languageVersion: ts.ScriptTarget,
+    onError?: (message: string) => void
+  ): ts.SourceFile | undefined => {
+    const fileModel = this._fileNameToFileModel[fileName]
+
+    if (fileModel) {
+      return fileModel.sourceFile
+    } else if (onError) {
+      onError(`File “${fileName}” is missing`)
+    }
+  }
+
+  resolveModuleNames = (moduleNames: string[], containingFile: string): Array<ts.ResolvedModule | undefined> => {
+    return moduleNames.map(moduleName => {
+      let result = ts.resolveModuleName(moduleName, containingFile, this._compilerOptions, {
+        fileExists: this.fileExists,
+        readFile: this.readFile
+      })
+
+      return result.resolvedModule ? result.resolvedModule : undefined
+    })
+  }
 
   getCompilationSettings(): ts.CompilerOptions {
     return this._compilerOptions
@@ -270,9 +311,6 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
 
     if (model) {
       return model.version.toString()
-    } else if (this.isDefaultLibFileName(fileName)) {
-      // default lib is static
-      return '1'
     } else if (fileName in this._extraLibs) {
       return String(this._extraLibs[fileName].version)
     }
@@ -289,11 +327,9 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     let model = this._getModel(fileName)
 
     if (model) {
-      return model.content
+      return model.uncompiledText
     } else if (fileName in this._extraLibs) {
       return this._extraLibs[fileName].content
-    } else if (fileName in libBundlesByFileName) {
-      return libBundlesByFileName[fileName].content
     }
   }
 
@@ -303,7 +339,7 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
       return
     }
 
-    return <ts.IScriptSnapshot>{
+    return {
       getText: (start, end) => text.substring(start, end),
       getLength: () => text.length,
       getChangeRange: noop
@@ -330,94 +366,63 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     return ''
   }
 
-  getDefaultLibFileName(options: ts.CompilerOptions): string {
-    const tsTargetEnum =
-      (options.target && tsTargetToEnum[(options.target as unknown) as keyof typeof tsTargetToEnum]) ||
-      tsTargetToEnum.ES2015
-
-    return tsTargetEnum <= tsTargetToEnum.ES2015 ? libBundles.es2015DTS.fileName : libBundles.defaultLibDTS.fileName
+  getDefaultLibFileName() {
+    // TODO: this may be unnecessary if we specify a default lib for the user.
+    return 'lib.d.ts'
   }
-
-  isDefaultLibFileName(fileName: string): boolean {
-    return fileName === this.getDefaultLibFileName(this._compilerOptions)
-  }
-
-  // _createFileResolvePromise = async (absoluteModulePath: string, fileAbsoluteUrl: string): Promise<RootFileModel> => {
-  //   if (this._fileNameToFileModel[fileAbsoluteUrl]) {
-  //     return this._fileNameToFileModel[fileAbsoluteUrl]!
-  //   }
-
-  //   const fileResponse = await fetch(fileAbsoluteUrl + '?skip-compile=true')
-
-  //   if (!fileResponse.ok || fileResponse.status !== 200) {
-  //     throw new Error(fileResponse.statusText)
-  //   }
-
-  //   const fileContent = await fileResponse.text()
-
-  //   const rootFileModel = await this.addRootFile({
-  //     fileName: fileAbsoluteUrl,
-  //     content: fileContent
-  //   })
-
-  //   return rootFileModel
-  // }
 
   // --- language features
 
   private static clearFiles(diagnostics: ts.Diagnostic[]): ts.Diagnostic[] {
     // Clear the `file` field, which cannot be JSON'yfied because it
     // contains cyclic data structures.
+
     diagnostics.forEach(diag => {
       diag.file = undefined
-      const related = <ts.Diagnostic[]>diag.relatedInformation
+
+      const related = diag.relatedInformation
+
       if (related) {
         related.forEach(diag2 => (diag2.file = undefined))
       }
     })
-    return <ts.Diagnostic[]>diagnostics
+
+    return diagnostics
+  }
+
+  getCompilerOptionsDiagnostics = async (): Promise<ts.Diagnostic[]> => {
+    return this._languageService.getCompilerOptionsDiagnostics()
   }
 
   getSyntacticDiagnostics = async (fileName: string): Promise<ts.Diagnostic[]> => {
-    const diagnostics = this._languageService.getSyntacticDiagnostics(fileName)
-    return TypeScriptWorker.clearFiles(diagnostics)
+    return this._languageService.getSyntacticDiagnostics(fileName)
   }
 
   getSemanticDiagnostics = async (fileName: string): Promise<ts.Diagnostic[]> => {
-    const diagnostics = this._languageService.getSemanticDiagnostics(fileName)
-    return TypeScriptWorker.clearFiles(diagnostics)
+    return this._languageService.getSemanticDiagnostics(fileName)
   }
 
   getSuggestionDiagnostics = async (fileName: string): Promise<ts.Diagnostic[]> => {
-    const diagnostics = this._languageService.getSuggestionDiagnostics(fileName)
-    return TypeScriptWorker.clearFiles(diagnostics)
+    return this._languageService.getSuggestionDiagnostics(fileName)
   }
 
-  getCompilerOptionsDiagnostics = async (fileName: string): Promise<ts.Diagnostic[]> => {
-    const diagnostics = this._languageService.getCompilerOptionsDiagnostics()
-    return TypeScriptWorker.clearFiles(diagnostics)
-  }
+  diagnosticPairs: DiagnosticPair[] = [
+    { type: 'syntactic', method: this.getSyntacticDiagnostics },
+    { type: 'semantic', method: this.getSemanticDiagnostics },
+    { type: 'suggestion', method: this.getSuggestionDiagnostics }
+  ]
 
-  getCombinedDiagnostics = async (fileName: string): Promise<string[]> => {
-    const diagnosticMethods = [
-      this.getCompilerOptionsDiagnostics,
-      this.getSyntacticDiagnostics,
-      this.getSemanticDiagnostics,
-      this.getSuggestionDiagnostics
-    ]
+  getCombinedDiagnostics = async (fileName: string): Promise<DiagnosticsResult[]> => {
+    const diagnosticRsesults: DiagnosticsResult[] = []
 
-    const allDiagnosticsPromises = await Promise.all(diagnosticMethods.map(method => method(fileName)))
-    const allDiagnostics = allDiagnosticsPromises.flat()
+    for (let { type, method } of this.diagnosticPairs) {
+      diagnosticRsesults.push({
+        type,
+        diagnostics: await method(fileName)
+      })
+    }
 
-    return allDiagnostics.map(diagnostic => {
-      const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')
-
-      if (diagnostic.file) {
-        let { line, character } = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start!)
-        return `  Error ${diagnostic.file.fileName} (${line + 1},${character + 1}): ${message}`
-      }
-      return `  Error: ${message}`
-    })
+    return diagnosticRsesults
   }
 
   async getCompletionsAtPosition(fileName: string, position: number): Promise<ts.CompletionInfo | undefined> {
@@ -505,11 +510,19 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
   }
 
   getEmitOutput = async (fileName: string): Promise<CompiledOutputFile> => {
+    const fileModel = this._getModel(fileName)
+
+    if (!fileModel) {
+      throw new Error(`Missing file model for “${fileName}”`)
+    }
+
     const { emitSkipped, outputFiles } = this._languageService.getEmitOutput(fileName)
 
-    if (emitSkipped) {
+    if (emitSkipped || !outputFiles.length) {
       return {
         fileName,
+        rawResponse: fileModel.rawResponse,
+        uncompiledText: fileModel.uncompiledText,
         compiledResult: null,
         diagnostics: await this.getCombinedDiagnostics(fileName)
       }
@@ -518,8 +531,28 @@ export class TypeScriptWorker implements ts.LanguageServiceHost {
     return {
       fileName,
       compiledResult: outputFiles[0].text,
+      uncompiledText: fileModel.uncompiledText,
+      rawResponse: fileModel.rawResponse,
       diagnostics: await this.getCombinedDiagnostics(fileName)
     }
+  }
+
+  getEmitOutputs = async (): Promise<CombinedEmitOutput> => {
+    const output: CombinedEmitOutput = {
+      files: {},
+      diagnostics: [
+        {
+          type: 'compiler',
+          diagnostics: await this.getCompilerOptionsDiagnostics()
+        }
+      ]
+    }
+
+    for (let fileName of Object.keys(this._fileNameToFileModel)) {
+      output.files[fileName] = await this.getEmitOutput(fileName)
+    }
+
+    return output
   }
 
   async getCodeFixesAtPosition(

@@ -1,6 +1,7 @@
 /// <reference lib="dom" />
 
 import { MyServerInitOptions, createDefaultInitOptions } from './server/init-options'
+import { clientDebug } from './server/utils/log'
 
 class MyServer {
   initOptions: MyServerInitOptions
@@ -27,7 +28,7 @@ class MyServer {
     entryScript.type = 'module'
     entryScript.src = `${this.scriptPathPrefix}${scope}${entry}`
 
-    console.log('appending entry script', entryScript)
+    clientDebug('Appending entry script', entryScript)
     document.body.appendChild(entryScript)
   }
 
@@ -35,7 +36,7 @@ class MyServer {
     this.serviceWorker = navigator.serviceWorker.controller
 
     this.appendEntryScript()
-    console.log('service worker changed', this.serviceWorker)
+    clientDebug('service worker changed', this.serviceWorker)
   }
 
   async register(): Promise<ServiceWorkerRegistration> {
@@ -51,12 +52,17 @@ class MyServer {
       return existingRegistration
     }
 
-    const { workerPath } = this.initOptions
-    const serviceWorkerRegistration = await navigator.serviceWorker.register(workerPath, {
+    const { workerBridgePath } = this.initOptions
+
+    // const workerBridge = new Blob([`self.importScripts('http://localhost:8888/service-worker.js')`], {
+    //   type: 'application/javascript'
+    // })
+
+    const serviceWorkerRegistration = await navigator.serviceWorker.register(workerBridgePath, {
       scope: this.initOptions.scope
     })
 
-    // console.log('waiting...', serviceWorkerRegistration)
+    console.log('waiting...', serviceWorkerRegistration)
     await navigator.serviceWorker.ready
     // console.log('registered!', serviceWorkerRegistration.active)
 

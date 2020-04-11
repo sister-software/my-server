@@ -3,13 +3,13 @@ export interface MyServerInitOptions {
   entry: string
   /** Scope limiting which files in your source directory should be compiled. */
   scope: string
-  workerPath: string
+  workerBridgePath: string
 }
 
 export const createDefaultInitOptions = (): MyServerInitOptions => {
   return {
     entry: 'main.ts',
     scope: '/',
-    workerPath: '/service-worker.js'
+    workerBridgePath: '/service-worker.js'
   }
 }

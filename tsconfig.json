@@ -12,7 +12,7 @@
     "module": "ES2015",
     "moduleResolution": "node",
     "isolatedModules": false,
-    "typeRoots": ["./node_modules/@types", "./src/types"],
+    "typeRoots": ["./src/types", "./node_modules/@types"],
     "outDir": "./build"
   },
   "include": ["src"]
